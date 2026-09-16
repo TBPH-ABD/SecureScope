@@ -1,0 +1,426 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Identity & tenancy ─────────────────────────────────────────────
+
+enum Role {
+  OWNER
+  SECURITY_ADMIN
+  ANALYST
+  VIEWER
+}
+
+model Organization {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships     Membership[]
+  assets          Asset[]
+  scans           Scan[]
+  findings        Finding[]
+  scoreSnapshots  ScoreSnapshot[]
+  reports         Report[]
+  schedules       MonitorSchedule[]
+  changeEvents    ChangeEvent[]
+  notifications   Notification[]
+  breachMonitors  BreachMonitor[]
+  invitations     Invitation[]
+  auditLogs       AuditLog[]
+  settings        OrganizationSettings?
+}
+
+model OrganizationSettings {
+  organizationId  String       @id @db.Uuid
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  alertEmails     String[]     @default([])
+  webhookUrl      String?
+  minAlertSeverity Severity    @default(HIGH)
+  updatedAt       DateTime     @updatedAt
+}
+
+model User {
+  id                 String    @id @default(uuid()) @db.Uuid
+  email              String    @unique
+  name               String
+  passwordHash       String
+  failedLoginCount   Int       @default(0)
+  lockedUntil        DateTime?
+  lastLoginAt        DateTime?
+  passwordChangedAt  DateTime  @default(now())
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  memberships   Membership[]
+  sessions      Session[]
+  notifications Notification[]
+}
+
+model Membership {
+  id             String       @id @default(uuid()) @db.Uuid
+  userId         String       @db.Uuid
+  organizationId String       @db.Uuid
+  role           Role
+  createdAt      DateTime     @default(now())
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, organizationId])
+  @@index([organizationId])
+}
+
+model Session {
+  id             String   @id @default(uuid()) @db.Uuid
+  tokenHash      String   @unique
+  csrfToken      String
+  userId         String   @db.Uuid
+  organizationId String   @db.Uuid
+  ipAddress      String?
+  userAgent      String?
+  createdAt      DateTime @default(now())
+  lastSeenAt     DateTime @default(now())
+  expiresAt      DateTime
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Invitation {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  email          String
+  role           Role
+  tokenHash      String       @unique
+  invitedById    String       @db.Uuid
+  expiresAt      DateTime
+  acceptedAt     DateTime?
+  revokedAt      DateTime?
+  createdAt      DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+}
+
+// ─── Assets & authorization ─────────────────────────────────────────
+
+enum AssetType {
+  DOMAIN
+  SUBDOMAIN
+  IP_ADDRESS
+  APPLICATION
+  OTHER
+}
+
+enum AuthorizationStatus {
+  PENDING
+  VERIFIED
+  REVOKED
+}
+
+enum VerificationMethod {
+  DNS_TXT
+  PARENT_DOMAIN
+  RESOLVES_FROM_VERIFIED
+  ATTESTATION
+}
+
+model Asset {
+  id                  String              @id @default(uuid()) @db.Uuid
+  organizationId      String              @db.Uuid
+  type                AssetType
+  value               String              // normalized hostname / IP / URL
+  label               String?
+  description         String?
+  tags                String[]            @default([])
+  criticality         Severity            @default(MEDIUM)
+  authorizationStatus AuthorizationStatus @default(PENDING)
+  verificationMethod  VerificationMethod?
+  verificationToken   String
+  verifiedAt          DateTime?
+  monitoringEnabled   Boolean             @default(true)
+  lastScannedAt       DateTime?
+  createdById         String?             @db.Uuid
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  organization   Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  findings       Finding[]
+  scans          Scan[]
+  authorizations AssetAuthorization[]
+  changeEvents   ChangeEvent[]
+  observations   AssetObservation[]
+
+  @@unique([organizationId, type, value])
+  @@index([organizationId, authorizationStatus])
+}
+
+/// Written attestation that the organization is permitted to test an asset.
+model AssetAuthorization {
+  id             String    @id @default(uuid()) @db.Uuid
+  assetId        String    @db.Uuid
+  attestedById   String    @db.Uuid
+  authorizerName String    // person/entity granting permission
+  scopeNote      String
+  validUntil     DateTime
+  revokedAt      DateTime?
+  createdAt      DateTime  @default(now())
+  asset          Asset     @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@index([assetId])
+}
+
+/// Latest raw facts per asset/module — the baseline for change detection.
+model AssetObservation {
+  id        String   @id @default(uuid()) @db.Uuid
+  assetId   String   @db.Uuid
+  moduleId  String
+  data      Json
+  scanId    String   @db.Uuid
+  updatedAt DateTime @updatedAt
+  asset     Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@unique([assetId, moduleId])
+}
+
+// ─── Scans ──────────────────────────────────────────────────────────
+
+enum ScanStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  PARTIAL
+  FAILED
+  BLOCKED
+}
+
+enum ScanTrigger {
+  MANUAL
+  SCHEDULED
+}
+
+model Scan {
+  id             String      @id @default(uuid()) @db.Uuid
+  organizationId String      @db.Uuid
+  assetId        String      @db.Uuid
+  status         ScanStatus  @default(QUEUED)
+  trigger        ScanTrigger @default(MANUAL)
+  requestedById  String?     @db.Uuid
+  modules        String[]
+  error          String?
+  findingsNew    Int         @default(0)
+  findingsTotal  Int         @default(0)
+  queuedAt       DateTime    @default(now())
+  startedAt      DateTime?
+  finishedAt     DateTime?
+
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  asset        Asset           @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  moduleRuns   ScanModuleRun[]
+
+  @@index([organizationId, queuedAt])
+  @@index([assetId, queuedAt])
+}
+
+model ScanModuleRun {
+  id           String     @id @default(uuid()) @db.Uuid
+  scanId       String     @db.Uuid
+  moduleId     String
+  status       ScanStatus
+  durationMs   Int?
+  error        String?
+  observations Json?
+  scan         Scan       @relation(fields: [scanId], references: [id], onDelete: Cascade)
+
+  @@index([scanId])
+}
+
+// ─── Findings ───────────────────────────────────────────────────────
+
+enum Severity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+  INFO
+}
+
+enum FindingStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  ACCEPTED
+}
+
+model Finding {
+  id             String        @id @default(uuid()) @db.Uuid
+  organizationId String        @db.Uuid
+  assetId        String        @db.Uuid
+  fingerprint    String
+  moduleId       String
+  checkId        String
+  title          String
+  severity       Severity
+  status         FindingStatus @default(OPEN)
+  description    String
+  remediation    String
+  evidence       Json
+  references     String[]      @default([])
+  assigneeId     String?       @db.Uuid
+  acceptedReason String?
+  firstSeenAt    DateTime      @default(now())
+  lastSeenAt     DateTime      @default(now())
+  resolvedAt     DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  asset        Asset            @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  comments     FindingComment[]
+
+  @@unique([organizationId, fingerprint])
+  @@index([organizationId, status, severity])
+  @@index([assetId])
+}
+
+model FindingComment {
+  id        String   @id @default(uuid()) @db.Uuid
+  findingId String   @db.Uuid
+  authorId  String   @db.Uuid
+  body      String
+  createdAt DateTime @default(now())
+  finding   Finding  @relation(fields: [findingId], references: [id], onDelete: Cascade)
+
+  @@index([findingId])
+}
+
+model ScoreSnapshot {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  score          Int
+  critical       Int
+  high           Int
+  medium         Int
+  low            Int
+  info           Int
+  createdAt      DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, createdAt])
+}
+
+// ─── Reports ────────────────────────────────────────────────────────
+
+model Report {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  title          String
+  createdById    String       @db.Uuid
+  /// Frozen snapshot of the data at generation time, so a report never changes.
+  content        Json
+  createdAt      DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, createdAt])
+}
+
+// ─── Monitoring ─────────────────────────────────────────────────────
+
+model MonitorSchedule {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @unique @db.Uuid
+  enabled        Boolean      @default(true)
+  intervalHours  Int          @default(24)
+  lastRunAt      DateTime?
+  nextRunAt      DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([enabled, nextRunAt])
+}
+
+model ChangeEvent {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  assetId        String?      @db.Uuid
+  kind           String       // e.g. "dns.record_changed", "tls.expiring", "ports.new_open"
+  severity       Severity
+  summary        String
+  details        Json
+  createdAt      DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  asset          Asset?       @relation(fields: [assetId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+}
+
+model Notification {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  userId         String       @db.Uuid
+  title          String
+  body           String
+  link           String?
+  readAt         DateTime?
+  createdAt      DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+}
+
+model BreachMonitor {
+  id             String           @id @default(uuid()) @db.Uuid
+  organizationId String           @db.Uuid
+  /// Must correspond to a VERIFIED DOMAIN asset in the same organization.
+  domain         String
+  lastCheckedAt  DateTime?
+  lastError      String?
+  createdAt      DateTime         @default(now())
+  organization   Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  exposures      BreachExposure[]
+
+  @@unique([organizationId, domain])
+}
+
+/// Only non-sensitive metadata. Passwords/credentials are never requested or stored.
+model BreachExposure {
+  id              String        @id @default(uuid()) @db.Uuid
+  monitorId       String        @db.Uuid
+  emailMasked     String        // e.g. "j***@example.com"
+  emailHash       String        // sha256, for de-duplication
+  breachName      String
+  breachDate      DateTime?
+  dataClasses     String[]      @default([])
+  firstSeenAt     DateTime      @default(now())
+  monitor         BreachMonitor @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+
+  @@unique([monitorId, emailHash, breachName])
+}
+
+// ─── Audit ──────────────────────────────────────────────────────────
+
+model AuditLog {
+  id             String        @id @default(uuid()) @db.Uuid
+  organizationId String?       @db.Uuid
+  actorId        String?       @db.Uuid
+  actorEmail     String?
+  action         String        // "auth.login", "asset.create", ...
+  resourceType   String?
+  resourceId     String?
+  metadata       Json?
+  ipAddress      String?
+  userAgent      String?
+  outcome        String        @default("success")
+  createdAt      DateTime      @default(now())
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, action])
+}

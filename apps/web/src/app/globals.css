@@ -1,0 +1,47 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  --canvas: 6 9 17;
+  --surface: 11 16 27;
+  --raised: 17 24 39;
+  --line: 30 41 59;
+  --ink: 226 232 240;
+  --muted: 148 163 184;
+  --faint: 100 116 139;
+  --accent: 34 211 238;
+  --ok: 16 185 129;
+  --sev-critical: 244 63 94;
+  --sev-high: 249 115 22;
+  --sev-medium: 234 179 8;
+  --sev-low: 96 165 250;
+  --sev-info: 148 163 184;
+}
+
+html, body { background: rgb(var(--canvas)); color: rgb(var(--ink)); }
+body { font-feature-settings: "ss01", "cv11"; -webkit-font-smoothing: antialiased; }
+
+::selection { background: rgb(var(--accent) / 0.3); }
+
+* { scrollbar-width: thin; scrollbar-color: rgb(var(--line)) transparent; }
+
+@layer components {
+  .card { @apply rounded-xl border border-line/70 bg-surface; }
+  .label { @apply text-[11px] font-medium uppercase tracking-[0.08em] text-faint; }
+  .input {
+    @apply w-full rounded-lg border border-line bg-canvas/60 px-3 py-2 text-sm text-ink placeholder:text-faint
+      outline-none transition focus:border-accent/60 focus:ring-2 focus:ring-accent/20 disabled:opacity-50;
+  }
+  .grid-bg {
+    background-image:
+      linear-gradient(rgb(var(--line) / 0.35) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(var(--line) / 0.35) 1px, transparent 1px);
+    background-size: 44px 44px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}

@@ -1,0 +1,82 @@
+name: securescope
+
+x-api-env: &api-env
+  NODE_ENV: production
+  DATABASE_URL: postgresql://securescope:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/securescope
+  APP_ORIGIN: ${APP_ORIGIN:-http://localhost:3000}
+  # Set COOKIE_SECURE=true and serve through HTTPS in any real deployment.
+  COOKIE_SECURE: ${COOKIE_SECURE:-true}
+  TRUST_PROXY: ${TRUST_PROXY:-true}
+  SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-12}
+  SESSION_IDLE_MINUTES: ${SESSION_IDLE_MINUTES:-60}
+  SCAN_PORTS: ${SCAN_PORTS:-21,22,23,25,53,80,110,143,443,445,3306,3389,5432,6379,8080,8443,27017}
+  SCAN_TIMEOUT_MS: ${SCAN_TIMEOUT_MS:-5000}
+  MONITOR_TICK_SECONDS: ${MONITOR_TICK_SECONDS:-300}
+  HIBP_API_KEY: ${HIBP_API_KEY:-}
+  HIBP_USER_AGENT: ${HIBP_USER_AGENT:-SecureScope}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USER: ${SMTP_USER:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_FROM: ${SMTP_FROM:-SecureScope <alerts@example.com>}
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: securescope
+      POSTGRES_USER: securescope
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U securescope"]
+      interval: 5s
+      retries: 10
+    networks: [internal]
+
+  migrate:
+    build: { context: ., dockerfile: apps/api/Dockerfile }
+    command: ["npx", "prisma", "migrate", "deploy"]
+    environment: *api-env
+    depends_on: { db: { condition: service_healthy } }
+    networks: [internal]
+
+  api:
+    build: { context: ., dockerfile: apps/api/Dockerfile }
+    restart: unless-stopped
+    environment: *api-env
+    depends_on: { migrate: { condition: service_completed_successfully } }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      retries: 5
+    # Outbound access for SMTP invitation e-mails.
+    networks: [internal, egress]
+
+  worker:
+    build: { context: ., dockerfile: apps/api/Dockerfile }
+    command: ["node", "dist/worker.js"]
+    restart: unless-stopped
+    environment: *api-env
+    depends_on: { migrate: { condition: service_completed_successfully } }
+    # The worker needs outbound internet access to scan external assets.
+    networks: [internal, egress]
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args: { API_INTERNAL_URL: http://api:4000 }
+    restart: unless-stopped
+    ports: ["3000:3000"]
+    depends_on: { api: { condition: service_healthy } }
+    networks: [internal, egress]
+
+networks:
+  internal: { internal: true }
+  egress: {}
+
+volumes:
+  pgdata:
